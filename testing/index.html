@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Smart Booking Engine — API Tester</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <h1>Smart Booking Engine <span class="sub">API Tester · 25 endpoints</span></h1>
+    <div id="userLine" class="userline">Not signed in — start with Step 1 below.</div>
+  </div>
+  <div class="conn">
+    <label class="fld inline">Base URL <input id="baseUrl" value="http://localhost:8080" spellcheck="false" /></label>
+    <span id="tokenBadge" class="badge off">no token</span>
+    <span id="roleBadge" class="badge off">no role</span>
+    <button id="btnClearToken" title="Clear stored token">Logout</button>
+  </div>
+</header>
+
+<nav class="flow" aria-label="Workflow">
+  <span class="flow-title">Workflow:</span>
+  <a href="#card-auth">1 · Sign in</a><span class="arrow">→</span>
+  <a href="#card-bookings">2 · Evaluate &amp; book</a><span class="arrow">→</span>
+  <a href="#card-approvals">3 · Approve</a>
+  <span class="flow-sep">·</span>
+  <span class="flow-title">Admin:</span>
+  <a href="#card-employees">Employees</a>
+  <a href="#card-quotas">Quotas</a>
+  <a href="#card-policies">Policies</a>
+</nav>
+
+<div class="demo-strip">
+  <strong>Try the case-study scenarios:</strong>
+  <button id="btnGood">Fill Good booking (9 AM → ALLOW)</button>
+  <button id="btnBad">Fill Bad booking (11:30 PM → NIGHT_SAFETY)</button>
+  <span class="hint">Fills the Evaluate + Create forms below. Sign in first; the Bad case needs a user registered with gender WOMAN.</span>
+</div>
+
+<main class="layout">
+<section class="cards">
+
+  <div class="card" id="card-auth">
+    <h2><span class="step">Step 1</span> Sign in <span class="tag">public</span></h2>
+    <p class="card-intro">Register creates an employee account and stores its token automatically. Use that token for everything below.</p>
+
+    <div class="ep">
+      <h3><span class="m post">POST</span> <code>/api/v1/auth/register</code></h3>
+      <p class="desc">Create an employee account. Public — no token needed. The returned token is saved and shown in the header.</p>
+      <form id="f-register" class="grid">
+        <label class="fld"><span>username <b>*</b></span><input name="username" placeholder="e.g. priya" required /></label>
+        <label class="fld"><span>password (8–72 chars) <b>*</b></span><input name="password" type="password" required /></label>
+        <label class="fld"><span>employee code <b>*</b></span><input name="employeeCode" placeholder="e.g. E-101" required /></label>
+        <label class="fld"><span>full name <b>*</b></span><input name="fullName" placeholder="e.g. Priya Sharma" required /></label>
+        <label class="fld"><span>business unit <b>*</b></span><input name="businessUnit" placeholder="e.g. BU-BLR" required /></label>
+        <label class="fld"><span>cost centre <b>*</b></span><input name="costCentreCode" placeholder="e.g. CC-BLR-01" required /></label>
+        <label class="fld"><span>gender <b>*</b></span><select name="gender"><option>WOMAN</option><option>MAN</option><option>OTHER</option><option>UNSPECIFIED</option></select></label>
+        <label class="fld"><span>shift start <b>*</b></span><input name="shiftStart" type="time" value="09:00" required /></label>
+        <label class="fld"><span>shift end <b>*</b></span><input name="shiftEnd" type="time" value="18:00" required /></label>
+        <button>Register → save token</button>
+      </form>
+    </div>
+
+    <div class="ep">
+      <h3><span class="m post">POST</span> <code>/api/v1/auth/login</code></h3>
+      <p class="desc">Sign in with an existing account. Public. Replaces the stored token.</p>
+      <form id="f-login" class="grid">
+        <label class="fld"><span>username <b>*</b></span><input name="username" placeholder="username" required /></label>
+        <label class="fld"><span>password <b>*</b></span><input name="password" type="password" required /></label>
+        <button>Login → save token</button>
+      </form>
+    </div>
+
+    <div class="ep">
+      <h3><span class="m get">GET</span> <code>/api/v1/auth/me</code></h3>
+      <p class="desc">Show who the current token belongs to: username, role and employee id.</p>
+      <form id="f-me" class="grid"><button>Who am I?</button></form>
+    </div>
+  </div>
+
+  <div class="card" id="card-bookings">
+    <h2><span class="step">Step 2</span> Evaluate &amp; book <span class="tag">EMPLOYEE | ADMIN | APPROVER</span></h2>
+    <p class="card-intro">Always <strong>Evaluate first</strong> — it is a free dry-run that shows the decision and every rule's verdict. Then <strong>Create</strong> to save the booking. New ids auto-fill the lookup forms below.</p>
+
+    <div class="ep">
+      <h3><span class="m post">POST</span> <code>/api/v1/bookings/evaluate?explain=</code></h3>
+      <p class="desc">Dry-run the rule stack without saving anything. Returns <code>ALLOW</code>, <code>DENY</code> or <code>NEEDS_APPROVAL</code> plus a per-rule breakdown. Non-admins: leave employeeId empty — the server uses your own account.</p>
+      <form id="f-evaluate" class="grid">
+        <label class="fld"><span>employeeId <i>(admin booking for someone else)</i></span><input name="employeeId" placeholder="UUID — leave empty normally" /></label>
+        <label class="fld"><span>booking date <b>*</b></span><input name="bookingDate" type="date" required /></label>
+        <label class="fld"><span>direction <b>*</b></span><select name="direction"><option>LOGIN</option><option>LOGOUT</option></select></label>
+        <label class="fld"><span>pickup <b>*</b></span><input name="pickupLocation" value="Gate A" required /></label>
+        <label class="fld"><span>drop <b>*</b></span><input name="dropLocation" value="Office" required /></label>
+        <label class="fld"><span>requested time <b>*</b></span><input name="requestedTime" type="datetime-local" required /></label>
+        <label class="fld"><span>route position <b>*</b></span><select name="routePosition"><option>FIRST_PICKUP</option><option>LAST_DROP</option><option selected>OTHER</option></select></label>
+        <label class="chk"><input name="hasPackedLunch" type="checkbox" /> packed lunch</label>
+        <label class="chk"><input name="requiresParking" type="checkbox" /> parking</label>
+        <label class="chk"><input name="escortAvailable" type="checkbox" /> escort available</label>
+        <label class="chk"><input name="explain" type="checkbox" checked /> include full rule breakdown</label>
+        <button>Evaluate (dry-run)</button>
+      </form>
+    </div>
+
+    <div class="ep">
+      <h3><span class="m post">POST</span> <code>/api/v1/bookings</code></h3>
+      <p class="desc">Save a real booking. Runs the same rules as Evaluate. The new booking id fills the Get / Cancel / Explanation forms automatically.</p>
+      <form id="f-bcreate" class="grid">
+        <label class="fld"><span>employeeId <i>(admin only)</i></span><input name="employeeId" placeholder="UUID — leave empty normally" /></label>
+        <label class="fld"><span>booking date <b>*</b></span><input name="bookingDate" type="date" required /></label>
+        <label class="fld"><span>direction <b>*</b></span><select name="direction"><option>LOGIN</option><option>LOGOUT</option></select></label>
+        <label class="fld"><span>pickup <b>*</b></span><input name="pickupLocation" value="Gate A" required /></label>
+        <label class="fld"><span>drop <b>*</b></span><input name="dropLocation" value="Office" required /></label>
+        <label class="fld"><span>requested time <b>*</b></span><input name="requestedTime" type="datetime-local" required /></label>
+        <label class="fld"><span>route position <b>*</b></span><select name="routePosition"><option>FIRST_PICKUP</option><option>LAST_DROP</option><option selected>OTHER</option></select></label>
+        <label class="chk"><input name="hasPackedLunch" type="checkbox" /> packed lunch</label>
+        <label class="chk"><input name="requiresParking" type="checkbox" /> parking</label>
+        <label class="chk"><input name="escortAvailable" type="checkbox" /> escort available</label>
+        <button>Create booking</button>
+      </form>
+    </div>
+
+    <div class="ep">
+      <h3><span class="m get">GET</span> <code>/api/v1/bookings/{id}</code></h3>
+      <p class="desc">Fetch one booking by its id.</p>
+      <form id="f-bget" class="grid">
+        <label class="fld"><span>booking id <b>*</b></span><input name="id" placeholder="auto-filled after Create" required /></label>
+        <button>Get booking</button>
+      </form>
+    </div>
+
+    <div class="ep">
+      <h3><span class="m get">GET</span> <code>/api/v1/bookings</code></h3>
+      <p class="desc">Search bookings. Every filter is optional — leave all empty to list everything.</p>
+      <form id="f-blist" class="grid">
+        <label class="fld"><span>employee filter</span><input name="employeeId" placeholder="UUID (optional)" /></label>
+        <label class="fld"><span>date filter</span><input name="date" type="date" /></label>
+        <label class="fld"><span>status filter</span><select name="status"><option value="">any status</option><option>CONFIRMED</option><option>PENDING_APPROVAL</option><option>CANCELLED</option><option>REJECTED</option></select></label>
+        <label class="fld"><span>page</span><input name="page" type="number" min="0" value="0" /></label>
+        <label class="fld"><span>page size</span><input name="size" type="number" min="1" value="20" /></label>
+        <label class="fld"><span>sort</span><input name="sort" placeholder="e.g. requestedTime,desc" /></label>
+        <button>Search bookings</button>
+      </form>
+    </div>
+
+    <div class="ep">
+      <h3><span class="m post">POST</span> <code>/api/v1/bookings/{id}/cancel</code></h3>
+      <p class="desc">Cancel a booking. Its seat goes back to the cost-centre quota.</p>
+      <form id="f-bcancel" class="grid">
+        <label class="fld"><span>booking id <b>*</b></span><input name="id" placeholder="auto-filled after Create" required /></label>
+        <button>Cancel booking</button>
+      </form>
+    </div>
+
+    <div class="ep">
+      <h3><span class="m get">GET</span> <code>/api/v1/bookings/{id}/explanation</code></h3>
+      <p class="desc">Show the stored rule-by-rule reasoning for an existing booking — which rules ran, in what order, and why each passed or failed.</p>
+      <form id="f-bexplain" class="grid">
+        <label class="fld"><span>booking id <b>*</b></span><input name="id" placeholder="auto-filled after Create" required /></label>
+        <button>Show explanation</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="card" id="card-employees">
+    <h2>Employees</h2>
+    <p class="card-intro">Reading needs any signed-in role. Creating and editing need <strong>ADMIN</strong>.</p>
+    <div class="ep">
+      <h3><span class="m post">POST</span> <code>/api/v1/employees</code> <span class="tag">ADMIN</span></h3>
+      <p class="desc">Add an employee record directly (admin only). Prefer Register for normal sign-ups.</p>
+      <form id="f-ecreate" class="grid">
+        <label class="fld"><span>employee code <b>*</b></span><input name="employeeCode" placeholder="e.g. E-102" required /></label>
+        <label class="fld"><span>full name <b>*</b></span><input name="fullName" required /></label>
+        <label class="fld"><span>business unit <b>*</b></span><input name="businessUnit" required /></label>
+        <label class="fld"><span>cost centre <b>*</b></span><input name="costCentreCode" required /></label>
+        <label class="fld"><span>gender <b>*</b></span><select name="gender"><option>WOMAN</option><option>MAN</option><option>OTHER</option><option>UNSPECIFIED</option></select></label>
+        <label class="fld"><span>shift start <b>*</b></span><input name="shiftStart" type="time" value="09:00" required /></label>
+        <label class="fld"><span>shift end <b>*</b></span><input name="shiftEnd" type="time" value="18:00" required /></label>
+        <label class="chk"><input name="active" type="checkbox" checked /> active</label>
+        <button>Create employee</button>
+      </form>
+    </div>
+    <div class="ep">
+      <h3><span class="m get">GET</span> <code>/api/v1/employees/{id}</code></h3>
+      <p class="desc">Fetch one employee by id.</p>
+      <form id="f-eget" class="grid">
+        <label class="fld"><span>employee id <b>*</b></span><input name="id" placeholder="UUID" required /></label>
+        <button>Get employee</button>
+      </form>
+    </div>
+    <div class="ep">
+      <h3><span class="m get">GET</span> <code>/api/v1/employees</code></h3>
+      <p class="desc">List employees, paged.</p>
+      <form id="f-elist" class="grid">
+        <label class="fld"><span>page</span><input name="page" type="number" min="0" value="0" /></label>
+        <label class="fld"><span>page size</span><input name="size" type="number" min="1" value="20" /></label>
+        <label class="fld"><span>sort</span><input name="sort" placeholder="e.g. fullName,asc" /></label>
+        <button>List employees</button>
+      </form>
+    </div>
+    <div class="ep">
+      <h3><span class="m put">PUT</span> <code>/api/v1/employees/{id}</code> <span class="tag">ADMIN</span></h3>
+      <p class="desc">Replace an employee. Full replacement — every field below is required.</p>
+      <form id="f-eupdate" class="grid">
+        <label class="fld"><span>employee id <b>*</b></span><input name="id" placeholder="UUID" required /></label>
+        <label class="fld"><span>full name <b>*</b></span><input name="fullName" required /></label>
+        <label class="fld"><span>business unit <b>*</b></span><input name="businessUnit" required /></label>
+        <label class="fld"><span>cost centre <b>*</b></span><input name="costCentreCode" required /></label>
+        <label class="fld"><span>gender <b>*</b></span><select name="gender"><option>WOMAN</option><option>MAN</option><option>OTHER</option><option>UNSPECIFIED</option></select></label>
+        <label class="fld"><span>shift start <b>*</b></span><input name="shiftStart" type="time" value="09:00" required /></label>
+        <label class="fld"><span>shift end <b>*</b></span><input name="shiftEnd" type="time" value="18:00" required /></label>
+        <label class="chk"><input name="active" type="checkbox" checked /> active</label>
+        <button>Save full update</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="card" id="card-approvals">
+    <h2><span class="step">Step 3</span> Approvals <span class="tag">APPROVER | ADMIN</span></h2>
+    <p class="card-intro">Bookings decided as <code>NEEDS_APPROVAL</code> wait here until approved or rejected.</p>
+    <div class="ep">
+      <h3><span class="m get">GET</span> <code>/api/v1/approvals/pending</code></h3>
+      <p class="desc">List bookings waiting for a decision.</p>
+      <form id="f-apending" class="grid">
+        <label class="fld"><span>page</span><input name="page" type="number" min="0" value="0" /></label>
+        <label class="fld"><span>page size</span><input name="size" type="number" min="1" value="20" /></label>
+        <label class="fld"><span>sort</span><input name="sort" placeholder="optional" /></label>
+        <button>Show pending</button>
+      </form>
+    </div>
+    <div class="ep">
+      <h3><span class="m post">POST</span> <code>/api/v1/approvals/{bookingId}/approve</code></h3>
+      <p class="desc">Approve a pending booking — it becomes CONFIRMED and takes a quota seat.</p>
+      <form id="f-aapprove" class="grid">
+        <label class="fld"><span>booking id <b>*</b></span><input name="bookingId" placeholder="auto-filled after Create" required /></label>
+        <button>Approve</button>
+      </form>
+    </div>
+    <div class="ep">
+      <h3><span class="m post">POST</span> <code>/api/v1/approvals/{bookingId}/reject</code></h3>
+      <p class="desc">Reject a pending booking — terminal, frees any held seat.</p>
+      <form id="f-areject" class="grid">
+        <label class="fld"><span>booking id <b>*</b></span><input name="bookingId" placeholder="auto-filled after Create" required /></label>
+        <button>Reject</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="card" id="card-quotas">
+    <h2>Quotas <span class="tag">ADMIN</span></h2>
+    <p class="card-intro">A quota is the seat pool for one cost centre. Bookings consume seats; cancellations return them.</p>
+    <div class="ep">
+      <h3><span class="m get">GET</span> <code>/api/v1/quotas</code></h3>
+      <p class="desc">List all quotas with capacity, reserved and free seats.</p>
+      <form id="f-qlist" class="grid"><button>List quotas</button></form>
+    </div>
+    <div class="ep">
+      <h3><span class="m post">POST</span> <code>/api/v1/quotas</code></h3>
+      <p class="desc">Create a seat pool for a cost centre.</p>
+      <form id="f-qcreate" class="grid">
+        <label class="fld"><span>cost centre <b>*</b></span><input name="costCentreCode" placeholder="e.g. CC-BLR-01" required /></label>
+        <label class="fld"><span>capacity (seats) <b>*</b></span><input name="capacity" type="number" min="0" value="20" required /></label>
+        <button>Create quota</button>
+      </form>
+    </div>
+    <div class="ep">
+      <h3><span class="m put">PUT</span> <code>/api/v1/quotas/{id}</code></h3>
+      <p class="desc">Change capacity. <code>reservedSeats</code> is an optional manual correction (0 … capacity).</p>
+      <form id="f-qupdate" class="grid">
+        <label class="fld"><span>quota id <b>*</b></span><input name="id" placeholder="auto-filled after create" required /></label>
+        <label class="fld"><span>capacity <b>*</b></span><input name="capacity" type="number" min="0" placeholder="e.g. 25" required /></label>
+        <label class="fld"><span>reserved seats <i>(optional)</i></span><input name="reservedSeats" type="number" min="0" placeholder="leave empty normally" /></label>
+        <button>Update quota</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="card" id="card-policies">
+    <h2>Policies <span class="tag">ADMIN</span></h2>
+    <p class="card-intro">The rule stack. Blank business unit / cost centre means "applies to everyone". Lower priority number runs first. Toggle or reorder rules with the PATCH forms - no redeploy needed.</p>
+    <div class="ep">
+      <h3><span class="m get">GET</span> <code>/api/v1/policies</code></h3>
+      <p class="desc">List every rule with its scope, priority, on/off state and parameters.</p>
+      <form id="f-plist" class="grid"><button>List policies</button></form>
+    </div>
+    <div class="ep">
+      <h3><span class="m post">POST</span> <code>/api/v1/policies</code></h3>
+      <p class="desc">Add a rule. Parameters depend on the type: <code>BOOKING_CUTOFF</code> takes <code>{"cutoffMinutes":60}</code>, <code>NIGHT_SAFETY</code> takes <code>{"nightStart":"22:00","nightEnd":"05:00","requireEscort":true}</code>, others take <code>{}</code>.</p>
+      <form id="f-pcreate" class="grid">
+        <label class="fld"><span>business unit <i>(blank = all)</i></span><input name="businessUnit" placeholder="blank = wildcard" /></label>
+        <label class="fld"><span>cost centre <i>(blank = all)</i></span><input name="costCentreCode" placeholder="blank = wildcard" /></label>
+        <label class="fld"><span>rule type <b>*</b></span><select name="ruleType"><option>SHIFT_WINDOW</option><option>BOOKING_CUTOFF</option><option>DUPLICATE_BOOKING</option><option>COST_CENTRE_QUOTA</option><option>NIGHT_SAFETY</option></select></label>
+        <label class="fld"><span>priority (lower runs first) <b>*</b></span><input name="priority" type="number" min="0" value="100" required /></label>
+        <label class="chk"><input name="enabled" type="checkbox" checked /> enabled</label>
+        <label class="chk"><input name="hardDeny" type="checkbox" checked /> hard deny (fail = DENY)</label>
+        <label class="fld wide"><span>parameters (JSON)</span><textarea name="parameters" rows="2" placeholder='e.g. {"cutoffMinutes":60}'></textarea></label>
+        <button>Create policy</button>
+      </form>
+    </div>
+    <div class="ep">
+      <h3><span class="m get">GET</span> <code>/api/v1/policies/{id}</code></h3>
+      <p class="desc">Fetch one rule by id.</p>
+      <form id="f-pget" class="grid">
+        <label class="fld"><span>policy id <b>*</b></span><input name="id" placeholder="auto-filled after create" required /></label>
+        <button>Get policy</button>
+      </form>
+    </div>
+    <div class="ep">
+      <h3><span class="m put">PUT</span> <code>/api/v1/policies/{id}</code></h3>
+      <p class="desc">Replace a rule wholesale — same fields as Create.</p>
+      <form id="f-pupdate" class="grid">
+        <label class="fld"><span>policy id <b>*</b></span><input name="id" placeholder="auto-filled after create" required /></label>
+        <label class="fld"><span>business unit <i>(blank = all)</i></span><input name="businessUnit" placeholder="blank = wildcard" /></label>
+        <label class="fld"><span>cost centre <i>(blank = all)</i></span><input name="costCentreCode" placeholder="blank = wildcard" /></label>
+        <label class="fld"><span>rule type <b>*</b></span><select name="ruleType"><option>SHIFT_WINDOW</option><option>BOOKING_CUTOFF</option><option>DUPLICATE_BOOKING</option><option>COST_CENTRE_QUOTA</option><option>NIGHT_SAFETY</option></select></label>
+        <label class="fld"><span>priority <b>*</b></span><input name="priority" type="number" min="0" value="100" required /></label>
+        <label class="chk"><input name="enabled" type="checkbox" checked /> enabled</label>
+        <label class="chk"><input name="hardDeny" type="checkbox" checked /> hard deny</label>
+        <label class="fld wide"><span>parameters (JSON)</span><textarea name="parameters" rows="2" placeholder="parameters JSON"></textarea></label>
+        <button>Save full update</button>
+      </form>
+    </div>
+    <div class="ep">
+      <h3><span class="m patch">PATCH</span> <code>/api/v1/policies/{id}/enabled</code></h3>
+      <p class="desc">Switch a rule on/off without touching anything else. Use this to demo “change rules without a redeploy”.</p>
+      <form id="f-penabled" class="grid">
+        <label class="fld"><span>policy id <b>*</b></span><input name="id" placeholder="auto-filled after create" required /></label>
+        <label class="chk"><input name="enabled" type="checkbox" checked /> enabled</label>
+        <button>Set on/off</button>
+      </form>
+    </div>
+    <div class="ep">
+      <h3><span class="m patch">PATCH</span> <code>/api/v1/policies/{id}/priority</code></h3>
+      <p class="desc">Reorder a rule without touching anything else.</p>
+      <form id="f-ppriority" class="grid">
+        <label class="fld"><span>policy id <b>*</b></span><input name="id" placeholder="auto-filled after create" required /></label>
+        <label class="fld"><span>new priority <b>*</b></span><input name="priority" type="number" min="0" value="100" required /></label>
+        <button>Set priority</button>
+      </form>
+    </div>
+  </div>
+
+</section>
+
+<aside class="viewer">
+  <div class="viewer-bar">
+    <strong id="respTitle">Response — results appear here</strong>
+    <button id="btnCopy">Copy</button>
+    <button id="btnClearResp">Clear</button>
+  </div>
+  <div id="verdict"></div>
+  <div id="summary"></div>
+  <pre id="response"><code>Nothing yet. Complete Step 1 (Register), then Evaluate a booking — the plain-English result shows here and the raw JSON below it.</code></pre>
+  <div id="toast" class="toast hidden"></div>
+</aside>
+</main>
+
+<script src="app.js" defer></script>
+</body>
+</html>
