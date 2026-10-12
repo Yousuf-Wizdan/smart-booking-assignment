@@ -1,35 +1,139 @@
 # Smart Booking Eligibility & Policy Rule Engine
 
-A Spring Boot REST API (MoveInSync backend case study) that evaluates an employee's
-office cab/shuttle booking against an ordered, configurable set of policy rules and
-returns exactly one decision: `ALLOW`, `DENY`, or `NEEDS_APPROVAL`. Every response
-explains which rules ran, in what order, and why each passed, failed, or was skipped.
+A Spring Boot REST API for the **MoveInSync Backend Hiring Assessment 2026 — Case Study 1**.
+When an employee books an office cab or shuttle, the system runs the request through a
+stack of configurable company policies — shift window, seat quota, booking cut-off,
+night-time women-safety, duplicates — and returns exactly one decision:
+`ALLOW`, `DENY`, or `NEEDS_APPROVAL`, with the exact machine-readable reason codes and
+a per-rule explanation of what ran and why.
 
-## Requirements implemented
+## Table of contents
 
-- Five rules: shift window, booking cutoff, duplicate booking, cost-centre quota,
-  gender night-safety.
-- Deterministic rule engine with explicit precedence (hard-deny beats soft-failure
-  beats pass) and ordered explain output.
-- Advisory evaluation (`POST /api/v1/bookings/evaluate`) with zero quota side effects.
-- Transactional booking creation with atomic conditional-update seat reservation.
-- Idempotent cancellation that releases exactly one seat; approval flow that
-  re-evaluates and reserves on approve; rejection as a distinct terminal status.
-- Policy CRUD + enable/disable + priority changes that take effect on the next
-  evaluation without restart.
-- JWT auth with three roles (`EMPLOYEE`, `ADMIN`, `APPROVER`) and server-side
-  ownership checks (the principal's linked employee decides identity, never a request id).
-- Consistent `ApiError` schema, Bean Validation, safe 500s, request-id correlation.
-- Flyway migrations (no Hibernate auto-DDL), PostgreSQL everywhere, Testcontainers
-  integration tests including the concurrent last-seat race.
-- Actuator health + Micrometer counters (`booking.evaluations`, `booking.created`,
-  `booking.cancelled`, `booking.approvals`, `booking.rule_violations`).
+- [Overview](#overview)
+- [Key features](#key-features)
+- [Technology stack](#technology-stack)
+- [Architecture and design](#architecture-and-design)
+- [Rule-engine behavior](#rule-engine-behavior)
+- [Data model](#data-model)
+- [Prerequisites](#prerequisites)
+- [Configuration and environment variables](#configuration-and-environment-variables)
+- [Installation and local setup](#installation-and-local-setup)
+- [Running the application](#running-the-application)
+- [API documentation](#api-documentation)
+- [Example booking evaluations](#example-booking-evaluations)
+- [Testing](#testing)
+- [Concurrency and transaction integrity](#concurrency-and-transaction-integrity)
+- [Security and error handling](#security-and-error-handling)
+- [Performance and complexity](#performance-and-complexity)
+- [Observability, caching, and failure recovery](#observability-caching-and-failure-recovery)
+- [Design decisions and trade-offs](#design-decisions-and-trade-offs)
+- [Assumptions and limitations](#assumptions-and-limitations)
+- [Future improvements](#future-improvements)
+- [Demo and submission checklist](#demo-and-submission-checklist)
 
-## Architecture and packages
+## Overview
 
-Controller → service → repository layering. DTOs (records) cross the API boundary;
-JPA entities never leak. Business logic lives in services and small rule strategy
-classes, not controllers.
+Booking an office cab looks like one yes/no question, but it is really a stack of
+policies: is the trip inside the employee's shift, are seats left in the cost centre,
+was it booked early enough, does the night-safety rule apply, is it a duplicate?
+Different clients switch different rules on with different priorities.
+
+This application is the engine that answers that question. It loads the enabled,
+applicable policy rows from PostgreSQL, evaluates each one through a small Strategy
+object, and returns one decision plus the full explanation — which rules ran, in what
+order, and why each passed, failed, or was skipped. Policy changes take effect on the
+next evaluation with no code change and no restart. Seat reservations are claimed with
+an atomic conditional update inside the same transaction that persists the booking, so
+two employees racing for the last seat cannot both win.
+
+## Key features
+
+- **Five policy rules**, each a stateless `BookingRule` strategy: `SHIFT_WINDOW`,
+  `COST_CENTRE_QUOTA`, `BOOKING_CUTOFF`, `NIGHT_SAFETY`, `DUPLICATE_BOOKING`.
+- **Deterministic decisions**: same request + same policy rows + same DB state always
+  yields the same verdict. Ordering is `(priority, ruleType, id)`.
+- **Explicit precedence**: a failing hard-deny rule forces `DENY` regardless of
+  priority; otherwise a failing soft rule (`hardDeny=false`) yields `NEEDS_APPROVAL`;
+  otherwise `ALLOW`.
+- **Explainability**: `POST /api/v1/bookings/evaluate?explain=true` returns the ordered
+  `ruleResults`; every persisted booking stores its evaluation snapshot, retrievable
+  via `GET /api/v1/bookings/{id}/explanation` even after policies change.
+- **Advisory evaluation**: evaluating never touches quota or bookings.
+- **Atomic quota**: `ALLOW` bookings reserve one seat with a conditional
+  `UPDATE … WHERE reserved_seats < capacity` in the same transaction as the insert.
+- **Idempotent cancellation**: releases exactly one seat; double-cancel is harmless and
+  never drives the count negative.
+- **Approval flow**: `NEEDS_APPROVAL` bookings wait as `PENDING_APPROVAL` (holding no
+  seat); approving re-evaluates current policies, reserves atomically, and confirms —
+  or refuses with a clear conflict. Rejection is a distinct terminal status.
+- **Hot policy configuration**: list/create/update/enable/disable/reorder/delete via
+  API; effective immediately.
+- **JWT auth with three roles** (`EMPLOYEE`, `ADMIN`, `APPROVER`), BCrypt passwords,
+  server-side ownership checks derived from the principal.
+- **Consistent errors**: one `ApiError` schema, Bean Validation, request-id correlation,
+  safe generic 500s.
+- **Flyway-owned schema** (Hibernate validates only), real-PostgreSQL integration tests
+  including the concurrent last-seat race.
+
+## Technology stack
+
+| Layer | Technology | Version |
+|---|---|---|
+| Language | Java | 21 |
+| Framework | Spring Boot (`spring-boot-starter-parent`) | 4.1.1 |
+| Build | Maven + Maven Wrapper (`mvnw` / `mvnw.cmd`) | wrapper-pinned |
+| Web | Spring Web MVC (`spring-boot-starter-webmvc`) | Boot-managed |
+| Persistence | Spring Data JPA + Hibernate | Boot-managed |
+| Validation | Bean Validation (`spring-boot-starter-validation`) | Boot-managed |
+| Security | Spring Security + jjwt (`jjwt-api/impl/jackson`) | Boot-managed / 0.12.6 |
+| Database | PostgreSQL (+ `postgresql` JDBC driver) | 16 (dev/test) |
+| Migrations | Flyway (`spring-boot-starter-flyway`, `flyway-database-postgresql`) | Boot-managed |
+| Observability | Spring Boot Actuator + Micrometer | Boot-managed |
+| Testing | JUnit 5, Mockito, AssertJ, Spring Boot test starters, Testcontainers (`testcontainers-junit-jupiter`, `testcontainers-postgresql`, `postgres:16-alpine`) | Boot-managed / TC 2.x |
+| Manual demo UI | Static HTML/JS in `testing/` (zero-build) | — |
+
+Not used (deliberately): no Dockerfiles/Compose files, no Swagger/OpenAPI, no caching
+framework, no message broker, no expression language. See
+[trade-offs](#design-decisions-and-trade-offs).
+
+## Architecture and design
+
+Request flow:
+
+```mermaid
+flowchart LR
+    Client --> Controller
+    Controller --> Service
+    Service --> Engine["RuleEngine + BookingRule strategies"]
+    Service --> Repo["Repositories (Spring Data JPA)"]
+    Repo --> DB[("PostgreSQL + Flyway")]
+    Engine --> Repo
+```
+
+Layer responsibilities:
+
+- **Controller** (`controller/`): HTTP mapping, DTO validation, status codes. No business
+  logic. Six controllers: `Auth`, `Employee`, `Booking`, `Policy`, `Quota`, `Approval`.
+- **Service** (`service/`): business logic and transactions. `BookingService` owns the
+  evaluate → reserve → persist flow; `ApprovalService` owns review; `PolicyService`
+  validates type-specific parameters; `AuthService`, `EmployeeService`, `QuotaService`
+  own their domains; `AdminBootstrap` seeds dev logins when explicitly enabled.
+- **Rule engine** (`service/rule/`): `RuleEngine` loads enabled, applicable
+  `PolicyRule` rows, sorts them, and runs each through its `BookingRule` strategy with
+  a `RuleContext`. Rules are read-only by contract — evaluation is advisory.
+- **Repository** (`repository/`): Spring Data interfaces plus the two conditional-update
+  quota statements and the pessimistic-lock booking lookup. Entities (`entity/`) never
+  cross the API boundary — controllers speak DTO records (`dto/`) only.
+- **Security** (`security/`, `config/SecurityConfig.java`): stateless JWT filter,
+  role matrix, deny-by-default, request-id filter.
+- **Shared config** (`config/ClockConfig.java`): one injectable `Clock` and company
+  `ZoneId`, so cutoff tests use fixed time instead of wall-clock sleeps.
+
+Design points a junior developer should be able to explain: rules are first-class
+database rows interpreted by Strategy objects (not nested `if`s); precedence is three
+lines of code in `RuleEngine.decide` plus tests; the database — not Java — serializes
+the last seat (conditional update + partial unique index); policy reads are never
+cached, so edits apply instantly.
 
 ```text
 com.moveinsync.smart_booking_engine/
@@ -41,232 +145,22 @@ com.moveinsync.smart_booking_engine/
 ├── exception/    ApiError, GlobalExceptionHandler, typed 4xx exceptions
 ├── repository/   Spring Data JPA + conditional-update quota methods
 ├── security/     JWT filter/service, user details, request-id filter
-├── service/      Auth, Employee, Policy, Quota, Booking, Approval, AdminBootstrap
+├── service/      Auth, Employee, Policy, Quota, Booking, Approval, AdminBootstrap,
+│                 BookingSpecifications
 │   └── rule/     BookingRule strategy, RuleContext, RuleResult, RuleEngine + 5 rules
-└── config/       SecurityConfig, ClockConfig
+└── config/       SecurityConfig, CorsConfig, ClockConfig
 ```
 
-## Rule engine and precedence
+## Rule-engine behavior
 
-`BookingRule` is the Strategy interface — one `@Component` per `RuleType`.
-`RuleEngine.evaluate` loads enabled rules ordered by
-(priority, ruleType, id), filters by scope (null scope = wildcard), runs every
-applicable rule, then decides:
+### Evaluation algorithm
 
-1. Every applicable rule runs, so the explanation shows the whole stack.
-2. A failing hard-deny rule forces `DENY`, regardless of priority.
-3. Otherwise a failing soft rule (`hardDeny=false`) yields `NEEDS_APPROVAL`.
-4. Otherwise `ALLOW`.
-5. `decidingReason` is the first failure in evaluation order within the winning
-   category; `failureReasons` lists every distinct failing code in that order.
-
-Complexity: sorting is O(R log R), evaluation is O(R) plus per-rule DB lookups
-(R = applicable rules). Explanation storage is O(R). A stored snapshot
-(`rule_results_json`) travels with each booking, so the original explanation
-survives later policy changes.
-
-## Database
-
-PostgreSQL + Flyway. `spring.jpa.hibernate.ddl-auto=validate` — Hibernate never
-touches the schema.
-
-```mermaid
-erDiagram
-    EMPLOYEE ||--o{ APP_USER : "linked profile"
-    EMPLOYEE ||--o{ BOOKING : "owns"
-    EMPLOYEE }o--|| COST_CENTRE_QUOTA : "costCentreCode"
-    EMPLOYEE }o--o{ POLICY_RULE : "businessUnit + costCentre scope"
-    APP_USER { uuid id PK uuid employee_id FK string username UK string password_hash string role }
-    EMPLOYEE { uuid id PK string employee_code UK string business_unit string cost_centre_code string gender time shift_start time shift_end bool active }
-    BOOKING { uuid id PK uuid employee_id FK date booking_date string direction timestamp requested_time string route_position string status string decision string deciding_reason text rule_results_json }
-    COST_CENTRE_QUOTA { uuid id PK string cost_centre_code UK int capacity int reserved_seats }
-    POLICY_RULE { uuid id PK string business_unit string cost_centre_code string rule_type bool enabled int priority bool hard_deny text parameters_json }
-```
-
-Key guards:
-
-- Partial unique index `uq_booking_active_slot (employee, requested_time, direction)
-  WHERE status IN ('CONFIRMED','PENDING_APPROVAL')` — the real duplicate protection.
-- Conditional `UPDATE ... SET reserved_seats = reserved_seats + 1
-  WHERE cost_centre_code = ? AND reserved_seats < capacity` — the real quota
-  protection (returns 1 on success, 0 when full). No read-then-write anywhere.
-- Matching conditional release guarded on `reserved_seats > 0` keeps
-  `0 <= reservedSeats <= capacity` plus a CHECK constraint.
-
-All business times are wall-clock in `app.company-time-zone` (default
-`Asia/Kolkata`). `requestedTime` is the service date-time and must fall on
-`bookingDate`.
-
-## Setup
-
-### Local PostgreSQL
-
-```powershell
-createdb smart_booking
-$env:DATABASE_URL="jdbc:postgresql://localhost:5432/smart_booking"
-$env:DATABASE_USERNAME="postgres"
-$env:DATABASE_PASSWORD="secret"
-.\mvnw.cmd spring-boot:run
-```
-
-Unix: `./mvnw spring-boot:run` with the same variables exported.
-
-### Neon
-
-Neon usually gives a `postgresql://user:password@host/db?sslmode=require` URI.
-Convert it to JDBC form:
-
-```text
-jdbc:postgresql://<host>/<db>?sslmode=require
-```
-
-then set `DATABASE_URL` to that value and `DATABASE_USERNAME`/`DATABASE_PASSWORD`
-separately. Keep `spring.jpa.hibernate.ddl-auto=validate` — run the app once and
-Flyway applies V1 + V2 automatically.
-
-### Tests
-
-```powershell
-.\mvnw.cmd test        # needs Docker for the Testcontainers PostgreSQL
-```
-
-Without Docker, integration tests (`*IT`) cannot run; unit tests still run with
-`.\mvnw.cmd -Dtest='!*IT' test`. Test reports land in `target/surefire-reports/`.
-
-## API
-
-Auth: `Authorization: Bearer <jwt>`. Every response carries `X-Request-Id`.
-
-| Method & path | Role | Purpose |
-|---|---|---|
-| POST /api/v1/auth/register | public | Self-register an EMPLOYEE (+ employee profile) |
-| POST /api/v1/auth/login | public | Get a JWT |
-| GET /api/v1/auth/me | any | Own identity |
-| POST /api/v1/employees | ADMIN | Create employee |
-| GET /api/v1/employees/{id} | ADMIN or self | Read profile |
-| GET /api/v1/employees | ADMIN (full) / EMPLOYEE (own only) | List |
-| PUT /api/v1/employees/{id} | ADMIN | Update |
-| POST /api/v1/bookings/evaluate?explain=true | EMPLOYEE+ | Advisory evaluation, no side effects |
-| POST /api/v1/bookings | EMPLOYEE+ | Evaluate + create (409 body is the evaluation on deny) |
-| GET /api/v1/bookings?employeeId=&date=&status= | ADMIN/APPROVER (any) / EMPLOYEE (own) | Search, paged |
-| GET /api/v1/bookings/{id} | owner/ADMIN/APPROVER | Read |
-| POST /api/v1/bookings/{id}/cancel | owner/ADMIN | Idempotent cancel, releases one seat |
-| GET /api/v1/bookings/{id}/explanation | owner/ADMIN/APPROVER | Stored snapshot |
-| GET/POST /api/v1/policies | ADMIN | List / create |
-| GET/PUT /api/v1/policies/{id} | ADMIN | Read / full update |
-| PATCH /api/v1/policies/{id}/enabled | ADMIN | Enable/disable |
-| PATCH /api/v1/policies/{id}/priority | ADMIN | Reorder |
-| DELETE /api/v1/policies/{id} | ADMIN | Delete (disable is the preferred soft-off) |
-| GET/POST /api/v1/quotas | ADMIN | List / create |
-| PUT /api/v1/quotas/{id} | ADMIN | Update capacity (+ optional admin seat correction) |
-| GET /api/v1/approvals/pending | APPROVER/ADMIN | Pending queue, paged |
-| POST /api/v1/approvals/{id}/approve | APPROVER/ADMIN | Re-evaluate + reserve + confirm |
-| POST /api/v1/approvals/{id}/reject | APPROVER/ADMIN | Mark REJECTED (no seat) |
-
-Role matrix: EMPLOYEE evaluates/books/cancels own bookings only. ADMIN manages
-employees, quotas, policies, and can cancel any booking. APPROVER sees the pending
-queue and approves/rejects; ADMIN can do approver operations too. Unlisted routes
-are denied by default.
-
-## Demo flow
-
-```bash
-BASE=http://localhost:8080
-
-# 1. Register (creates EMPLOYEE + profile)
-curl -s -X POST $BASE/api/v1/auth/register -H 'Content-Type: application/json' -d '{
-  "username":"priya","password":"password123","employeeCode":"E-101",
-  "fullName":"Priya Sharma","businessUnit":"BU-BLR","costCentreCode":"CC-BLR-01",
-  "gender":"WOMAN","shiftStart":"09:00","shiftEnd":"18:00"}' | tee /tmp/reg.json
-TOKEN=$(python3 -c "import json;print(json.load(open('/tmp/reg.json'))['token'])")
-EMP=$(python3 -c "import json;print(json.load(open('/tmp/reg.json'))['employeeId'])")
-AUTH="Authorization: Bearer $TOKEN"
-
-# 2-3. Admin: quota + default rules
-ADMIN_TOKEN=<login-as-admin-and-paste-jwt>
-curl -s -X POST $BASE/api/v1/quotas -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"costCentreCode":"CC-BLR-01","capacity":40}'
-curl -s $BASE/api/v1/policies -H "Authorization: Bearer $ADMIN_TOKEN"
-
-# 5. Valid evaluation -> ALLOW
-curl -s -X POST "$BASE/api/v1/bookings/evaluate?explain=true" -H "$AUTH" \
-  -H 'Content-Type: application/json' -d "{
-  \"employeeId\":\"$EMP\",\"bookingDate\":\"2026-10-15\",\"direction\":\"LOGIN\",
-  \"pickupLocation\":\"Koramangala\",\"dropLocation\":\"Whitefield\",
-  \"requestedTime\":\"2026-10-15T10:00:00\",\"routePosition\":\"OTHER\",
-  \"escortAvailable\":false}"
-
-# 6. Out-of-shift -> DENY / OUTSIDE_SHIFT_WINDOW (same body, requestedTime 22:30)
-# 7. Night safety -> DENY / NIGHT_SAFETY (routePosition FIRST_PICKUP, 23:00, no escort)
-
-# 8. Create (quota 0 -> 1) then 9. cancel (quota 1 -> 0)
-curl -s -X POST $BASE/api/v1/bookings -H "$AUTH" -H 'Content-Type: application/json' -d "{
-  \"bookingDate\":\"2026-10-15\",\"direction\":\"LOGIN\",
-  \"pickupLocation\":\"Koramangala\",\"dropLocation\":\"Whitefield\",
-  \"requestedTime\":\"2026-10-15T10:00:00\",\"routePosition\":\"OTHER\"}" | tee /tmp/booking.json
-BID=$(python3 -c "import json;print(json.load(open('/tmp/booking.json'))['id'])")
-curl -s -X POST $BASE/api/v1/bookings/$BID/cancel -H "$AUTH"
-
-# 10. Disable cutoff -> past booking evaluates ALLOW again
-CUTOFF_ID=10000000-0000-0000-0000-000000000003
-curl -s -X PATCH $BASE/api/v1/policies/$CUTOFF_ID/enabled \
-  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"enabled":false}'
-
-# 11. Soft rule (hardDeny:false BOOKING_CUTOFF) -> NEEDS_APPROVAL -> PENDING_APPROVAL,
-#     then POST /api/v1/approvals/$BID/approve as approver -> CONFIRMED.
-
-# 12. Concurrent last-seat proof: BookingConcurrencyIT#concurrentLastSeatRaceReservesExactlyOnce
-#     (capacity 1, two threads, barrier start; asserts one CONFIRMED + one QUOTA_EXCEEDED DENY,
-#     reservedSeats == 1, exactly one active booking).
-```
-
-Seed logins for local demos only (never production): set `APP_BOOTSTRAP_ENABLED=true`
-plus `APP_BOOTSTRAP_ADMIN_USERNAME/PASSWORD` (and optionally the approver pair) —
-the app creates the missing accounts once at startup.
-
-## Concurrency design
-
-- Last seat: one transaction runs evaluation → `reserveSeat` conditional UPDATE →
-  booking insert + flush. If the update count is 0, the request is denied with
-  `QUOTA_EXCEEDED` and nothing is persisted. Two racers cannot both get count 1.
-- Duplicates: the read-only duplicate rule gives a fast answer; the partial unique
-  index gives the guarantee. A lost race surfaces as 409, and the transaction rolls
-  the seat reservation back.
-- Approval: re-evaluation plus the same conditional UPDATE inside one transaction;
-  double-approves hit the status check (`409`) and double-reserves are impossible.
-- Cancellation: status flip + conditional release (`reserved_seats > 0`) in one
-  transaction; already-cancelled is returned untouched, so double-cancels can't
-  release twice or drive the count negative.
-
-Last-seat test result (run 2026-10-10, `.\mvnw.cmd test` on Testcontainers PostgreSQL 16):
-`Tests run: 56, Failures: 0, Errors: 0, Skipped: 0 — BUILD SUCCESS`, including
-`BookingConcurrencyIT#concurrentLastSeatRaceReservesExactlyOnce`.
-
-## Trade-offs and complexity
-
-- Single Spring Boot monolith: simpler to build, test, deploy and explain than
-  anything distributed; no brokers, locks, or event sourcing per the brief.
-- Correctness over caching: no policy cache, so rule changes apply on the next
-  evaluation with zero invalidation risk.
-- O(R log R) sort + O(R) evaluation; O(R) snapshot storage; indexes on
-  (employee, date, status), requested_time, and (business_unit, cost_centre,
-  enabled, priority).
-- JWT stateless auth (jjwt) with BCrypt hashes; dev bootstrap is env-gated and
-  off by default.
-- Route position is an explicit `RoutePosition` input, never inferred from
-  free-text addresses — documented modelling assumption for the night-safety rule.
-- Approval needs a soft-failure source: the five seeded rules are hard-deny by
-  default, so `NEEDS_APPROVAL` appears when an admin creates a `hardDeny:false`
-  rule (demonstrated in the approval tests).
-
-## Known limitations / assumptions
-
-- Company timezone is a single configured zone for all business times.
-- `requestedTime` must fall on `bookingDate`; pickup/drop must differ (case-insensitive).
-- `bookingDate` uses the service date in the company zone; cross-midnight trips
-  keep the date of the service time.
-- Pending-approval bookings hold no seat; rejection is terminal (`REJECTED`).
-- Quota rows are per cost centre; a missing row denies with `QUOTA_NOT_CONFIGURED`.
-- Tests need Docker for Testcontainers; otherwise run unit tests only (see above).
+1. Load enabled rules (`findEnabledOrdered`), keep rows whose scope matches the
+   employee (`businessUnit == null` matches every unit; `costCentreCode == null`
+   matches every cost centre within it), sort by **priority, then rule-type name,
+   then row id**.
+2. Run **every** applicable rule (no short-circuit — the explanation must show the
+   whole stack). A policy row with no registered strategy implementation fails closed
+   as `INVALID_RULE_PARAMETERS` instead of crashing.
+3. Combine: any failing hard-deny → `DENY`; else any failing soft rule → 
+...[truncated 20887 chars]
